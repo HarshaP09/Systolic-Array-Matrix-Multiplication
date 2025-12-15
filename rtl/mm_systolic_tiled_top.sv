@@ -143,11 +143,12 @@ module mm_systolic_tiled_top #(
     S_UART_HDR   = 4'd4,
     S_UART_SET   = 4'd5,
     S_UART_WAIT  = 4'd6,
-    S_UART_HEX   = 4'd7,
-    S_UART_SEP   = 4'd8,
-    S_UART_CR    = 4'd9,
-    S_UART_LF    = 4'd10,
-    S_DONE       = 4'd11
+    S_UART_LATCH = 4'd7,
+    S_UART_HEX   = 4'd8,
+    S_UART_SEP   = 4'd9,
+    S_UART_CR    = 4'd10,
+    S_UART_LF    = 4'd11,
+    S_DONE       = 4'd12
   } state_t;
 
   state_t state;
@@ -208,6 +209,32 @@ module mm_systolic_tiled_top #(
     b_lin_addr = logic'((k*N) + col);
   endfunction
 
+  // ---------------------------------------------------------------------------
+  // C BRAM write port control (combinational).
+  // IMPORTANT: BRAM write enable/address/data must be stable BEFORE the clock edge
+  // when the BRAM writes. Driving these from the FSM clocked block would delay them
+  // by 1 cycle and prevent the write.
+  // ---------------------------------------------------------------------------
+  always_comb begin
+    c_we    = 1'b0;
+    c_waddr = '0;
+    c_wdata = '0;
+
+    if (state == S_WRITEBACK) begin
+      int r;
+      int c;
+      int row;
+      int col;
+      r   = wb_idx / P;
+      c   = wb_idx % P;
+      row = blk_i + r;
+      col = blk_j + c;
+      c_we    = 1'b1;
+      c_waddr = logic'((row*N) + col);
+      c_wdata = c_tile[r][c];
+    end
+  end
+
   // Main FSM
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
@@ -238,9 +265,6 @@ module mm_systolic_tiled_top #(
         a_addr[i] <= '0;
         b_addr[i] <= '0;
       end
-      c_we    <= 1'b0;
-      c_waddr <= '0;
-      c_wdata <= '0;
     end else begin
       // defaults each cycle
       tx_start <= 1'b0;
@@ -249,11 +273,6 @@ module mm_systolic_tiled_top #(
       // drive systolic control defaults
       clear_sa <= 1'b0;
       en_sa    <= 1'b0;
-
-      // default: no write
-      c_we    <= 1'b0;
-      c_waddr <= '0;
-      c_wdata <= '0;
 
       unique case (state)
         // One cycle to clear the systolic tile and pre-issue t=0 addresses.
@@ -340,19 +359,6 @@ module mm_systolic_tiled_top #(
 
         // Write P*P tile results to C BRAM.
         S_WRITEBACK: begin
-          int r;
-          int c;
-          int row;
-          int col;
-          r   = wb_idx / P;
-          c   = wb_idx % P;
-          row = blk_i + r;
-          col = blk_j + c;
-
-          c_we    <= 1'b1;
-          c_waddr <= logic'((row*N) + col);
-          c_wdata <= c_tile[r][c];
-
           if (wb_idx == (P*P - 1)) begin
             state <= S_NEXTBLOCK;
           end else begin
@@ -402,8 +408,13 @@ module mm_systolic_tiled_top #(
           state   <= S_UART_WAIT;
         end
 
-        // Wait 1 cycle for BRAM read data after setting c_raddr.
+        // Wait 1 full cycle for synchronous BRAM read.
         S_UART_WAIT: begin
+          state <= S_UART_LATCH;
+        end
+
+        // Latch the BRAM read data (now valid), then start sending hex.
+        S_UART_LATCH: begin
           cur_word    <= c_rdata;
           hex_nib_idx <= 3'd7;
           state       <= S_UART_HEX;
