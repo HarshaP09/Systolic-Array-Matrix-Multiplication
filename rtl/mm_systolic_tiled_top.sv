@@ -157,7 +157,8 @@ module mm_systolic_tiled_top #(
   logic [$clog2(T_CYC+1)-1:0] step_run;
 
   // BRAM-latency alignment
-  logic [P-1:0] valid_a_feed, valid_b_feed;
+  logic [P-1:0] valid_a_issue, valid_b_issue;
+  logic [P-1:0] valid_a_feed,  valid_b_feed;
 
   // writeback
   logic [$clog2(P*P)-1:0] wb_idx;
@@ -244,6 +245,8 @@ module mm_systolic_tiled_top #(
       step_run     <= '0;
       en_sa        <= 1'b0;
       clear_sa     <= 1'b1;
+      valid_a_issue<= '0;
+      valid_b_issue<= '0;
       valid_a_feed <= '0;
       valid_b_feed <= '0;
       wb_idx       <= '0;
@@ -273,6 +276,14 @@ module mm_systolic_tiled_top #(
       // drive systolic control defaults
       clear_sa <= 1'b0;
       en_sa    <= 1'b0;
+
+      // Align BRAM synchronous-read data with valid:
+      // - valid_*_issue corresponds to addresses issued THIS cycle
+      // - valid_*_feed corresponds to BRAM output data available THIS cycle
+      valid_a_feed  <= valid_a_issue;
+      valid_b_feed  <= valid_b_issue;
+      valid_a_issue <= '0;
+      valid_b_issue <= '0;
 
       unique case (state)
         // One cycle to clear the systolic tile and pre-issue t=0 addresses.
@@ -307,8 +318,8 @@ module mm_systolic_tiled_top #(
             b_addr[c]  <= b_lin_addr((k < 0) ? 0 : k, col);
           end
 
-          valid_a_feed <= va_next;
-          valid_b_feed <= vb_next;
+          valid_a_issue <= va_next;
+          valid_b_issue <= vb_next;
 
           state <= S_RUN;
         end
@@ -340,12 +351,12 @@ module mm_systolic_tiled_top #(
               vb_next[c] = (t >= c) && (k >= 0) && (k < K);
               b_addr[c]  <= b_lin_addr((k < 0) ? 0 : k, col);
             end
-            valid_a_feed <= va_next;
-            valid_b_feed <= vb_next;
+            valid_a_issue <= va_next;
+            valid_b_issue <= vb_next;
           end else begin
-            // last feed: don't care about next issue
-            valid_a_feed <= '0;
-            valid_b_feed <= '0;
+            // last feed: don't issue any more reads
+            valid_a_issue <= '0;
+            valid_b_issue <= '0;
           end
 
           if (step_run == T_CYC-1) begin
