@@ -233,7 +233,7 @@ module mm_systolic_tiled_top #(
       r = idx / N;
       c = idx % N;
       // mod 16 -> lower 4 bits; store in DATA_W bits
-      a_init_val = logic'(((3*r + 5*c) & 16'hF));
+      a_init_val = logic [DATA_W-1:0]'(((3*r + 5*c) & 16'hF));
     end
   endfunction
 
@@ -243,9 +243,31 @@ module mm_systolic_tiled_top #(
     begin
       r = idx / N;
       c = idx % N;
-      b_init_val = logic'(((7*r + 11*c) & 16'hF));
+      b_init_val = logic [DATA_W-1:0]'(((7*r + 11*c) & 16'hF));
     end
   endfunction
+
+  // ---------------------------------------------------------------------------
+  // A/B BRAM init write controls (combinational).
+  // IMPORTANT: as with C BRAM, write controls must be stable BEFORE clk edge.
+  // ---------------------------------------------------------------------------
+  always_comb begin
+    a_init_we   = 1'b0;
+    a_init_addr = '0;
+    a_init_data = '0;
+    b_init_we   = 1'b0;
+    b_init_addr = '0;
+    b_init_data = '0;
+
+    if (state == S_INIT_AB) begin
+      a_init_we   = 1'b1;
+      a_init_addr = init_idx;
+      a_init_data = a_init_val(init_idx);
+      b_init_we   = 1'b1;
+      b_init_addr = init_idx;
+      b_init_data = b_init_val(init_idx);
+    end
+  end
 
   // ---------------------------------------------------------------------------
   // C BRAM write port control (combinational).
@@ -315,14 +337,6 @@ module mm_systolic_tiled_top #(
       clear_sa <= 1'b0;
       en_sa    <= 1'b0;
 
-      // Default: no A/B init writes
-      a_init_we   <= 1'b0;
-      a_init_addr <= '0;
-      a_init_data <= '0;
-      b_init_we   <= 1'b0;
-      b_init_addr <= '0;
-      b_init_data <= '0;
-
       // Align BRAM synchronous-read data with valid:
       // - valid_*_issue corresponds to addresses issued THIS cycle
       // - valid_*_feed corresponds to BRAM output data available THIS cycle
@@ -334,14 +348,6 @@ module mm_systolic_tiled_top #(
       unique case (state)
         // Initialize A and B BRAM banks (all banks get identical contents).
         S_INIT_AB: begin
-          a_init_we   <= 1'b1;
-          a_init_addr <= init_idx;
-          a_init_data <= a_init_val(init_idx);
-
-          b_init_we   <= 1'b1;
-          b_init_addr <= init_idx;
-          b_init_data <= b_init_val(init_idx);
-
           if (init_idx == DEPTH-1) begin
             init_idx <= '0;
             state    <= S_CLEAR;
