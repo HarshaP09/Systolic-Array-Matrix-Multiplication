@@ -12,12 +12,16 @@ module top_boolean_mm #(
   output logic UART_txd
 );
 
-  logic rst_n /* synthesis keep */;
+  logic rst_n;
   logic done;
 
   // Simple power-on reset: hold rst_n low for a short time after configuration.
   // ~2^20 / 100 MHz ~= 10.5 ms
   logic [19:0] por_ctr;
+  initial begin
+    por_ctr = '0;
+    rst_n   = 1'b0;
+  end
   always_ff @(posedge clk) begin
     if (por_ctr != {20{1'b1}}) begin
       por_ctr <= por_ctr + 1'b1;
