@@ -33,27 +33,38 @@ module tb_mm_systolic_tiled_top;
   initial clk = 1'b0;
   always #50 clk = ~clk;
 
-  function automatic int a_val(input int r, input int c);
+  // ---------------------------------------------------------------------------
+  // Reference math (keep it tool-friendly for XSim):
+  // - Avoid declaring variables mid-block.
+  // - Avoid loop-variable declarations inside the for() header.
+  // ---------------------------------------------------------------------------
+  function automatic integer a_val(input integer r, input integer c);
     a_val = (3*r + 5*c) % 16;
   endfunction
-  function automatic int b_val(input int r, input int c);
+
+  function automatic integer b_val(input integer r, input integer c);
     b_val = (7*r + 11*c) % 16;
   endfunction
 
-  int c_ref [0:N-1][0:N-1];
-
-  initial begin
-    // build reference C = A*B
-    for (int i = 0; i < N; i++) begin
-      for (int j = 0; j < N; j++) begin
-        int sum = 0;
-        for (int k = 0; k < N; k++) begin
-          sum += a_val(i,k) * b_val(k,j);
-        end
-        c_ref[i][j] = sum;
+  function automatic integer c_exp(input integer i, input integer j);
+    integer k;
+    integer sum;
+    begin
+      sum = 0;
+      for (k = 0; k < N; k = k + 1) begin
+        sum = sum + a_val(i,k) * b_val(k,j);
       end
+      c_exp = sum;
     end
-  end
+  endfunction
+
+  integer timeout_cycles;
+  integer errors;
+  integer i;
+  integer j;
+  integer addr;
+  integer got_int;
+  integer exp_int;
 
   initial begin
     rst_n = 1'b0;
@@ -61,7 +72,7 @@ module tb_mm_systolic_tiled_top;
     rst_n = 1'b1;
 
     // wait for completion (includes UART stream)
-    int timeout_cycles = 200_000;
+    timeout_cycles = 200_000;
     while (!done && timeout_cycles > 0) begin
       @(posedge clk);
       timeout_cycles--;
@@ -71,27 +82,26 @@ module tb_mm_systolic_tiled_top;
     end
 
     $display("\n---- C (hex) read from dut BRAM ----");
-    for (int i = 0; i < N; i++) begin
+    for (i = 0; i < N; i = i + 1) begin
       $write("row %0d: ", i);
-      for (int j = 0; j < N; j++) begin
-        int addr = i*N + j;
-        logic signed [ACC_W-1:0] got;
-        got = dut.u_c_bram.mem[addr];
-        $write("%08x ", got);
+      for (j = 0; j < N; j = j + 1) begin
+        addr = i*N + j;
+        $write("%08x ", dut.u_c_bram.mem[addr]);
       end
       $write("\n");
     end
 
-    // check a few values
-    int errors = 0;
-    for (int i = 0; i < N; i++) begin
-      for (int j = 0; j < N; j++) begin
-        int addr = i*N + j;
-        int got  = dut.u_c_bram.mem[addr];
-        if (got !== c_ref[i][j]) begin
+    // Check all values against reference
+    errors = 0;
+    for (i = 0; i < N; i = i + 1) begin
+      for (j = 0; j < N; j = j + 1) begin
+        addr    = i*N + j;
+        got_int = dut.u_c_bram.mem[addr];
+        exp_int = c_exp(i,j);
+        if (got_int !== exp_int) begin
           errors++;
           if (errors < 10) begin
-            $display("Mismatch C[%0d,%0d]: got=%0d exp=%0d", i, j, got, c_ref[i][j]);
+            $display("Mismatch C[%0d,%0d]: got=%0d exp=%0d", i, j, got_int, exp_int);
           end
         end
       end
