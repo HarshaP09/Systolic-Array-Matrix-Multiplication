@@ -24,39 +24,51 @@ module mm_systolic_tiled_top #(
   localparam int T_CYC   = K + (2*P) - 2; // schedule length for each P x P tile
 
   // ---------------------------------------------------------------------------
-  // A/B ROM banks (replicated to get enough read ports per cycle).
+  // A/B BRAM banks (replicated to get enough read ports per cycle).
+  // NOTE: We *initialize* them at runtime to guarantee non-zero contents on FPGA
+  // (relying on inferred BRAM init from an initial-block is tool/flow sensitive).
   // ---------------------------------------------------------------------------
   logic [ADDR_W-1:0] a_addr [P];
   logic [ADDR_W-1:0] b_addr [P];
   logic [DATA_W-1:0] a_data_u [P];
   logic [DATA_W-1:0] b_data_u [P];
 
+  logic              a_init_we;
+  logic [ADDR_W-1:0] a_init_addr;
+  logic [DATA_W-1:0] a_init_data;
+
+  logic              b_init_we;
+  logic [ADDR_W-1:0] b_init_addr;
+  logic [DATA_W-1:0] b_init_data;
+
   genvar bi;
   generate
     for (bi = 0; bi < P; bi = bi + 1) begin : GEN_A_BANKS
-      bram_rom_sync #(
+      bram_tdp #(
         .WIDTH(DATA_W),
         .DEPTH(DEPTH),
-        .ADDR_W(ADDR_W),
-        .N(N),
-        .INIT_MODE(0)
-      ) u_a_rom (
-        .clk(clk),
-        .rd_addr(a_addr[bi]),
-        .rd_data(a_data_u[bi])
+        .ADDR_W(ADDR_W)
+      ) u_a_bram (
+        .clk    (clk),
+        .a_we   (a_init_we),
+        .a_addr (a_init_addr),
+        .a_wdata(a_init_data),
+        .b_addr (a_addr[bi]),
+        .b_rdata(a_data_u[bi])
       );
     end
     for (bi = 0; bi < P; bi = bi + 1) begin : GEN_B_BANKS
-      bram_rom_sync #(
+      bram_tdp #(
         .WIDTH(DATA_W),
         .DEPTH(DEPTH),
-        .ADDR_W(ADDR_W),
-        .N(N),
-        .INIT_MODE(1)
-      ) u_b_rom (
-        .clk(clk),
-        .rd_addr(b_addr[bi]),
-        .rd_data(b_data_u[bi])
+        .ADDR_W(ADDR_W)
+      ) u_b_bram (
+        .clk    (clk),
+        .a_we   (b_init_we),
+        .a_addr (b_init_addr),
+        .a_wdata(b_init_data),
+        .b_addr (b_addr[bi]),
+        .b_rdata(b_data_u[bi])
       );
     end
   endgenerate
@@ -136,19 +148,20 @@ module mm_systolic_tiled_top #(
   // Controller FSM
   // ---------------------------------------------------------------------------
   typedef enum logic [3:0] {
-    S_CLEAR      = 4'd0,
-    S_RUN        = 4'd1,
-    S_WRITEBACK  = 4'd2,
-    S_NEXTBLOCK  = 4'd3,
-    S_UART_HDR   = 4'd4,
-    S_UART_SET   = 4'd5,
-    S_UART_WAIT  = 4'd6,
-    S_UART_LATCH = 4'd7,
-    S_UART_HEX   = 4'd8,
-    S_UART_SEP   = 4'd9,
-    S_UART_CR    = 4'd10,
-    S_UART_LF    = 4'd11,
-    S_DONE       = 4'd12
+    S_INIT_AB    = 4'd0,
+    S_CLEAR      = 4'd1,
+    S_RUN        = 4'd2,
+    S_WRITEBACK  = 4'd3,
+    S_NEXTBLOCK  = 4'd4,
+    S_UART_HDR   = 4'd5,
+    S_UART_SET   = 4'd6,
+    S_UART_WAIT  = 4'd7,
+    S_UART_LATCH = 4'd8,
+    S_UART_HEX   = 4'd9,
+    S_UART_SEP   = 4'd10,
+    S_UART_CR    = 4'd11,
+    S_UART_LF    = 4'd12,
+    S_DONE       = 4'd13
   } state_t;
 
   state_t state;
@@ -162,6 +175,9 @@ module mm_systolic_tiled_top #(
 
   // writeback
   logic [$clog2(P*P)-1:0] wb_idx;
+
+  // A/B init
+  logic [ADDR_W-1:0] init_idx;
 
   // UART streaming
   logic [$clog2(DEPTH)-1:0] uart_addr;
@@ -210,6 +226,27 @@ module mm_systolic_tiled_top #(
     b_lin_addr = logic'((k*N) + col);
   endfunction
 
+  function automatic logic [DATA_W-1:0] a_init_val(input logic [ADDR_W-1:0] idx);
+    int r;
+    int c;
+    begin
+      r = idx / N;
+      c = idx % N;
+      // mod 16 -> lower 4 bits; store in DATA_W bits
+      a_init_val = logic'(((3*r + 5*c) & 16'hF));
+    end
+  endfunction
+
+  function automatic logic [DATA_W-1:0] b_init_val(input logic [ADDR_W-1:0] idx);
+    int r;
+    int c;
+    begin
+      r = idx / N;
+      c = idx % N;
+      b_init_val = logic'(((7*r + 11*c) & 16'hF));
+    end
+  endfunction
+
   // ---------------------------------------------------------------------------
   // C BRAM write port control (combinational).
   // IMPORTANT: BRAM write enable/address/data must be stable BEFORE the clock edge
@@ -239,7 +276,7 @@ module mm_systolic_tiled_top #(
   // Main FSM
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
-      state        <= S_CLEAR;
+      state        <= S_INIT_AB;
       blk_i        <= '0;
       blk_j        <= '0;
       step_run     <= '0;
@@ -262,6 +299,7 @@ module mm_systolic_tiled_top #(
       hex_nib_idx  <= 3'd0;
       cur_word     <= '0;
       c_raddr      <= '0;
+      init_idx     <= '0;
 
       // init BRAM addresses and write controls
       for (int i = 0; i < P; i++) begin
@@ -277,6 +315,14 @@ module mm_systolic_tiled_top #(
       clear_sa <= 1'b0;
       en_sa    <= 1'b0;
 
+      // Default: no A/B init writes
+      a_init_we   <= 1'b0;
+      a_init_addr <= '0;
+      a_init_data <= '0;
+      b_init_we   <= 1'b0;
+      b_init_addr <= '0;
+      b_init_data <= '0;
+
       // Align BRAM synchronous-read data with valid:
       // - valid_*_issue corresponds to addresses issued THIS cycle
       // - valid_*_feed corresponds to BRAM output data available THIS cycle
@@ -286,6 +332,24 @@ module mm_systolic_tiled_top #(
       valid_b_issue <= '0;
 
       unique case (state)
+        // Initialize A and B BRAM banks (all banks get identical contents).
+        S_INIT_AB: begin
+          a_init_we   <= 1'b1;
+          a_init_addr <= init_idx;
+          a_init_data <= a_init_val(init_idx);
+
+          b_init_we   <= 1'b1;
+          b_init_addr <= init_idx;
+          b_init_data <= b_init_val(init_idx);
+
+          if (init_idx == DEPTH-1) begin
+            init_idx <= '0;
+            state    <= S_CLEAR;
+          end else begin
+            init_idx <= init_idx + 1'b1;
+          end
+        end
+
         // One cycle to clear the systolic tile and pre-issue t=0 addresses.
         S_CLEAR: begin : CLEAR_BLK
           logic [P-1:0] va_next;
@@ -485,7 +549,7 @@ module mm_systolic_tiled_top #(
         end
 
         default: begin
-          state <= S_CLEAR;
+          state <= S_INIT_AB;
         end
       endcase
     end
